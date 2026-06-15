@@ -1,0 +1,92 @@
+name: Build cmangos-classic + playerbots (Windows x64)
+
+# 触发方式：
+#   1) 在 GitHub 网页 Actions 页点 "Run workflow" 手动触发
+#   2) 每次往 main/master 推送代码自动触发
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+env:
+  BUILD_TYPE: Release
+  BOOST_TOOLSET: "msvc"
+  BOOST_VERSION: "1.87.0"
+  BOOST_PLATFORM_VERSION: "2022"
+  CORE_REPO: "https://github.com/cmangos/mangos-classic.git"
+  BOTS_REPO: "https://github.com/cmangos/playerbots.git"
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: 拉取本仓库(含自定义补丁)
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: 克隆 cmangos-classic 核心
+        run: git clone --depth 1 ${{ env.CORE_REPO }} mangos
+
+      - name: 克隆 playerbots 模块到 src/modules/Bots
+        run: git clone --depth 1 ${{ env.BOTS_REPO }} mangos/src/modules/Bots
+
+      - name: 应用自定义补丁(patch 目录若存在)
+        shell: pwsh
+        run: |
+          if (Test-Path custom/patch) {
+            Write-Host "检测到 custom/patch，正在覆盖到核心源码..."
+            Copy-Item -Path custom/patch/* -Destination mangos -Recurse -Force
+            Write-Host "补丁已应用。"
+          } else {
+            Write-Host "未发现 custom/patch，编译纯官方版本。"
+          }
+
+      - name: 安装 Boost
+        uses: MarkusJx/install-boost@v2.6.0
+        id: install-boost
+        with:
+          boost_version: ${{ env.BOOST_VERSION }}
+          platform_version: ${{ env.BOOST_PLATFORM_VERSION }}
+          toolset: ${{ env.BOOST_TOOLSET }}
+
+      - name: CMake 配置(启用 playerbots，关闭地图提取器)
+        env:
+          BOOST_ROOT: ${{ steps.install-boost.outputs.BOOST_ROOT }}
+        run: >
+          cmake -B mangos/bin/builddir -S mangos
+          -DBUILD_PLAYERBOTS=ON
+          -DBUILD_EXTRACTORS=OFF
+          -DBUILD_GAME_SERVER=ON
+          -DBUILD_LOGIN_SERVER=ON
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: 编译
+        run: cmake --build mangos/bin/builddir --config ${{ env.BUILD_TYPE }} --parallel
+
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $binDir = "mangos/bin/builddir/bin/x64_Release"
+          if (-not (Test-Path $binDir)) { $binDir = "mangos/bin/builddir/bin/Release" }
+          Write-Host "产物目录: $binDir"
+          Copy-Item "$binDir/*" release/ -Recurse -Force
+          # playerbot 配置模板(vanilla)
+          Get-ChildItem mangos/src/modules/Bots/playerbot/aiplayerbot*.conf.dist -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName release/ -Force }
+          # playerbot 数据库脚本(如需更新DB)
+          if (Test-Path mangos/src/modules/Bots/sql) {
+            New-Item -ItemType Directory -Force -Path release/playerbots-sql | Out-Null
+            Copy-Item mangos/src/modules/Bots/sql/* release/playerbots-sql/ -Recurse -Force
+          }
+          Write-Host "=== 最终产物清单 ==="
+          Get-ChildItem release -Recurse | Select-Object FullName
+
+      - name: 上传成品(可在 Actions 页下载)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmangos-classic-bots-win64
+          path: release
+          retention-days: 30
